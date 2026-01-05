@@ -4,6 +4,8 @@ from pydantic import BaseModel, HttpUrl
 from typing import Optional, Dict, Any
 import yt_dlp
 import re
+import httpx
+import json
 from datetime import datetime
 
 app = FastAPI(
@@ -97,6 +99,115 @@ def get_thumbnail_urls(video_id: str) -> Dict[str, Dict[str, Any]]:
     }
 
 
+async def scrape_with_oembed_and_page(video_id: str, url: str) -> Dict[str, Any]:
+    """Fallback scraper using oEmbed API and page scraping"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Get basic info from oEmbed
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        
+        oembed_data = {}
+        try:
+            resp = await client.get(oembed_url, headers=headers)
+            if resp.status_code == 200:
+                oembed_data = resp.json()
+        except:
+            pass
+        
+        # Try to get more data from the page
+        page_data = {}
+        try:
+            page_url = f"https://www.youtube.com/watch?v={video_id}"
+            resp = await client.get(page_url, headers=headers)
+            if resp.status_code == 200:
+                html = resp.text
+                # Extract JSON data from page
+                match = re.search(r'var ytInitialPlayerResponse\s*=\s*({.+?});', html)
+                if match:
+                    page_data = json.loads(match.group(1))
+        except:
+            pass
+        
+        # Build response from available data
+        video_details = page_data.get('videoDetails', {})
+        microformat = page_data.get('microformat', {}).get('playerMicroformatRenderer', {})
+        
+        is_short = '/shorts/' in url or (video_details.get('lengthSeconds') and int(video_details.get('lengthSeconds', 0)) <= 60)
+        
+        duration_seconds = int(video_details.get('lengthSeconds', 0))
+        
+        return {
+            "videoId": video_id,
+            "isShort": is_short,
+            "snippet": {
+                "publishedAt": microformat.get('publishDate', ''),
+                "channelId": video_details.get('channelId', ''),
+                "channelUrl": f"https://www.youtube.com/channel/{video_details.get('channelId', '')}" if video_details.get('channelId') else '',
+                "title": video_details.get('title', '') or oembed_data.get('title', ''),
+                "description": video_details.get('shortDescription', ''),
+                "thumbnails": get_thumbnail_urls(video_id),
+                "channelTitle": video_details.get('author', '') or oembed_data.get('author_name', ''),
+                "categoryId": microformat.get('category', ''),
+                "liveBroadcastContent": "live" if video_details.get('isLive') else "none",
+                "defaultLanguage": None,
+                "localized": {
+                    "title": video_details.get('title', '') or oembed_data.get('title', ''),
+                    "description": video_details.get('shortDescription', '')
+                },
+                "defaultAudioLanguage": None,
+                "tags": video_details.get('keywords', [])
+            },
+            "statistics": {
+                "viewCount": video_details.get('viewCount', '0'),
+                "likeCount": "0",
+                "favoriteCount": "0",
+                "commentCount": "0"
+            },
+            "status": {
+                "uploadStatus": "processed",
+                "privacyStatus": "public",
+                "license": "youtube",
+                "embeddable": True,
+                "publicStatsViewable": True,
+                "madeForKids": microformat.get('isFamilySafe', True)
+            },
+            "contentDetails": {
+                "duration": format_duration(duration_seconds),
+                "durationSeconds": duration_seconds,
+                "dimension": "2d",
+                "definition": "hd",
+                "caption": "false",
+                "licensedContent": True,
+                "contentRating": {},
+                "projection": "rectangular"
+            },
+            "player": {
+                "embedHtml": oembed_data.get('html', f'<iframe width="480" height="270" src="//www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe>')
+            },
+            "channel": {
+                "id": video_details.get('channelId', ''),
+                "title": video_details.get('author', '') or oembed_data.get('author_name', ''),
+                "customUrl": oembed_data.get('author_url', ''),
+                "subscriberCount": "0",
+                "thumbnails": {
+                    "default": {
+                        "url": "",
+                        "width": 88,
+                        "height": 88
+                    }
+                }
+            },
+            "additionalInfo": {
+                "ageRestricted": video_details.get('isAgeRestricted', False),
+                "availableCountries": "public",
+                "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+                "originalUrl": url
+            }
+        }
+
+
 def scrape_youtube_video(url: str) -> Dict[str, Any]:
     """Scrape YouTube video data using yt-dlp"""
     video_id = extract_video_id(url)
@@ -108,11 +219,13 @@ def scrape_youtube_video(url: str) -> Dict[str, Any]:
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        'extractor_args': {'youtube': {'player_client': ['android_embedded', 'ios', 'web']}},
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
+        'age_limit': None,
+        'geo_bypass': True,
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -235,13 +348,20 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
     
     Example: /video?url=https://www.youtube.com/watch?v=VIDEO_ID
     """
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+    
     try:
         data = scrape_youtube_video(url)
         return VideoResponse(success=True, data=data)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
+        # Fallback to web scraping if yt-dlp fails
+        try:
+            data = await scrape_with_oembed_and_page(video_id, url)
+            return VideoResponse(success=True, data=data)
+        except Exception as fallback_error:
+            raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
 
 
 @app.post("/video", response_model=VideoResponse)
@@ -251,13 +371,20 @@ async def get_video_by_body(request: VideoRequest):
     
     Request body: {"url": "https://www.youtube.com/watch?v=VIDEO_ID"}
     """
+    video_id = extract_video_id(request.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+    
     try:
         data = scrape_youtube_video(request.url)
         return VideoResponse(success=True, data=data)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
+        # Fallback to web scraping if yt-dlp fails
+        try:
+            data = await scrape_with_oembed_and_page(video_id, request.url)
+            return VideoResponse(success=True, data=data)
+        except Exception as fallback_error:
+            raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
 
 
 if __name__ == "__main__":
