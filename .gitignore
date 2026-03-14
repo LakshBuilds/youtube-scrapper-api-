@@ -1,39 +1,42 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Virtual environment
-.venv/
+*.so
+.Python
 venv/
-ENV/
+.venv/
 env/
+ENV/
 
-# IDE
-.vscode/
-.idea/
-
-# Environment variables
+# API Keys and Secrets
 .env
-.env.local
+*.env
+credentials.json
 
-# OS
-.DS_Store
-Thumbs.db
+# Data files (optional - uncomment if you don't want to commit data)
+# *.json
+# *.csv
 
 # Logs
 *.log
 fetch_output.log
 fetch_with_stats.log
 
-# Data files (don't commit large data)
-shorts_data.json
-new_batch_data.json
-batch3_data.json
-shorts_summary.csv
-new_batch_summary.csv
-batch3_summary.csv
-shorts_summary_complete.csv
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Terminal outputs
+terminals/
 
 # Temporary files
+*.tmp
+*.bak
 scraper_pid.txt
