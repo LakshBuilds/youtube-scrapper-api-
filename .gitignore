@@ -23,3 +23,17 @@ Thumbs.db
 
 # Logs
 *.log
+fetch_output.log
+fetch_with_stats.log
+
+# Data files (don't commit large data)
+shorts_data.json
+new_batch_data.json
+batch3_data.json
+shorts_summary.csv
+new_batch_summary.csv
+batch3_summary.csv
+shorts_summary_complete.csv
+
+# Temporary files
+scraper_pid.txt
