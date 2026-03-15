@@ -219,13 +219,28 @@ def scrape_youtube_video(url: str) -> Dict[str, Any]:
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'extractor_args': {'youtube': {'player_client': ['android_embedded', 'ios', 'web']}},
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
+        'format': 'best',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android_embedded', 'web'],
+                'player_skip': ['configs', 'webpage'],
+                'skip': ['hls', 'dash', 'translated_subs']
+            }
         },
+        'http_headers': {
+            'User-Agent': 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        },
+        'nocheckcertificate': True,
         'age_limit': None,
         'geo_bypass': True,
+        'socket_timeout': 30,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
+        'allsubtitles': False,
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -356,12 +371,16 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
         data = scrape_youtube_video(url)
         return VideoResponse(success=True, data=data)
     except Exception as e:
+        # Log the error for debugging
+        print(f"⚠️ yt-dlp extraction failed for {video_id}: {str(e)}")
         # Fallback to web scraping if yt-dlp fails
         try:
+            print(f"→ Attempting fallback scraping for {video_id}")
             data = await scrape_with_oembed_and_page(video_id, url)
             return VideoResponse(success=True, data=data)
         except Exception as fallback_error:
-            raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
+            print(f"❌ Fallback also failed for {video_id}: {str(fallback_error)}")
+            raise HTTPException(status_code=500, detail=f"Primary error: {str(e)}, Fallback error: {str(fallback_error)}")
 
 
 @app.post("/video", response_model=VideoResponse)
@@ -379,12 +398,16 @@ async def get_video_by_body(request: VideoRequest):
         data = scrape_youtube_video(request.url)
         return VideoResponse(success=True, data=data)
     except Exception as e:
+        # Log the error for debugging
+        print(f"⚠️ yt-dlp extraction failed for {video_id}: {str(e)}")
         # Fallback to web scraping if yt-dlp fails
         try:
+            print(f"→ Attempting fallback scraping for {video_id}")
             data = await scrape_with_oembed_and_page(video_id, request.url)
             return VideoResponse(success=True, data=data)
         except Exception as fallback_error:
-            raise HTTPException(status_code=500, detail=f"Failed to scrape video: {str(e)}")
+            print(f"❌ Fallback also failed for {video_id}: {str(fallback_error)}")
+            raise HTTPException(status_code=500, detail=f"Primary error: {str(e)}, Fallback error: {str(fallback_error)}")
 
 
 if __name__ == "__main__":
