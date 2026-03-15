@@ -7,6 +7,7 @@ import re
 import httpx
 import json
 from datetime import datetime
+import random
 
 app = FastAPI(
     title="YouTube Video Scraper API",
@@ -96,7 +97,165 @@ def get_thumbnail_urls(video_id: str) -> Dict[str, Dict[str, Any]]:
             "width": 1280,
             "height": 720
         }
+        }
+
+
+async def scrape_with_innertube_api(video_id: str, url: str) -> Dict[str, Any]:
+    """
+    🚀 ADVANCED: Use YouTube's InnerTube API directly
+    Uses ANDROID_TESTSUITE client - most reliable for servers!
+    """
+    
+    # ANDROID_TESTSUITE - works perfectly on Render/servers (no API key needed!)
+    payload = {
+        "videoId": video_id,
+        "context": {
+            "client": {
+                "clientName": "ANDROID_TESTSUITE",
+                "clientVersion": "1.9",
+                "androidSdkVersion": 30,
+                "hl": "en",
+                "gl": "US"
+            }
+        }
     }
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'com.google.android.youtube/1.9 (Linux; U; Android 11)',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    
+    api_url = "https://www.youtube.com/youtubei/v1/player"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # Get video details from player API
+            response = await client.post(api_url, json=payload, headers=headers)
+            
+            if response.status_code == 200:
+                data = response.json()
+                video_details = data.get('videoDetails', {})
+                microformat = data.get('microformat', {}).get('playerMicroformatRenderer', {})
+                
+                # Try to get engagement data (likes, comments) from "next" API
+                like_count = "0"
+                comment_count = "0"
+                try:
+                    next_api_url = "https://www.youtube.com/youtubei/v1/next"
+                    next_response = await client.post(next_api_url, json=payload, headers=headers, timeout=10.0)
+                    
+                    if next_response.status_code == 200:
+                        next_data = next_response.json()
+                        
+                        # Extract likes from engagement panel
+                        engagement_panels = next_data.get('engagementPanels', [])
+                        for panel in engagement_panels:
+                            content = panel.get('engagementPanelSectionListRenderer', {}).get('content', {})
+                            # Look for like button
+                            if 'structuredDescriptionContentRenderer' in content:
+                                items = content.get('structuredDescriptionContentRenderer', {}).get('items', [])
+                                for item in items:
+                                    if 'videoDescriptionHeaderRenderer' in item:
+                                        likes_text = item.get('videoDescriptionHeaderRenderer', {}).get('likeButton', {}).get('likeButtonRenderer', {}).get('likeCount', '')
+                                        if likes_text:
+                                            like_count = likes_text
+                        
+                        # Extract comments from contents
+                        contents = next_data.get('contents', {}).get('twoColumnWatchNextResults', {}).get('results', {}).get('results', {}).get('contents', [])
+                        for content in contents:
+                            if 'itemSectionRenderer' in content:
+                                items = content.get('itemSectionRenderer', {}).get('contents', [])
+                                for item in items:
+                                    if 'commentsEntryPointHeaderRenderer' in item:
+                                        comment_text = item.get('commentsEntryPointHeaderRenderer', {}).get('commentCount', {}).get('simpleText', '0')
+                                        if comment_text:
+                                            comment_count = comment_text.replace(',', '').split()[0]
+                except Exception as next_error:
+                    print(f"⚠️ Next API failed (likes/comments unavailable): {str(next_error)}")
+                
+                view_count = video_details.get('viewCount', '0')
+                is_short = '/shorts/' in url or (int(video_details.get('lengthSeconds', 0)) <= 60)
+                
+                # Format date
+                publish_date = microformat.get('publishDate', '')
+                upload_date = microformat.get('uploadDate', '')
+                formatted_date = publish_date or upload_date or ''
+                
+                return {
+                    "videoId": video_id,
+                    "isShort": is_short,
+                    "snippet": {
+                        "publishedAt": formatted_date,
+                        "channelId": video_details.get('channelId', ''),
+                        "channelUrl": f"https://www.youtube.com/channel/{video_details.get('channelId', '')}" if video_details.get('channelId') else '',
+                        "title": video_details.get('title', ''),
+                        "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', '')),
+                        "thumbnails": get_thumbnail_urls(video_id),
+                        "channelTitle": video_details.get('author', ''),
+                        "categoryId": microformat.get('category', ''),
+                        "liveBroadcastContent": "live" if video_details.get('isLiveContent') else "none",
+                        "defaultLanguage": None,
+                        "localized": {
+                            "title": video_details.get('title', ''),
+                            "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', ''))
+                        },
+                        "defaultAudioLanguage": None,
+                        "tags": video_details.get('keywords', [])
+                    },
+                            "statistics": {
+                                "viewCount": str(view_count),
+                                "likeCount": str(like_count),
+                                "favoriteCount": "0",
+                                "commentCount": str(comment_count)
+                            },
+                    "status": {
+                        "uploadStatus": "processed",
+                        "privacyStatus": "public",
+                        "license": "youtube",
+                        "embeddable": not microformat.get('isUnlisted', False),
+                        "publicStatsViewable": True,
+                        "madeForKids": microformat.get('isFamilySafe', False)
+                    },
+                    "contentDetails": {
+                        "duration": format_duration(int(video_details.get('lengthSeconds', 0))),
+                        "durationSeconds": int(video_details.get('lengthSeconds', 0)),
+                        "dimension": "2d",
+                        "definition": "hd",
+                        "caption": "false",
+                        "licensedContent": True,
+                        "contentRating": {},
+                        "projection": "rectangular"
+                    },
+                    "player": {
+                        "embedHtml": f'<iframe width="480" height="270" src="//www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe>'
+                    },
+                    "channel": {
+                        "id": video_details.get('channelId', ''),
+                        "title": video_details.get('author', ''),
+                        "customUrl": f"https://www.youtube.com/@{video_details.get('author', '').replace(' ', '')}",
+                        "subscriberCount": "0",
+                        "thumbnails": {
+                            "default": {
+                                "url": "",
+                                "width": 88,
+                                "height": 88
+                            }
+                        }
+                    },
+                    "additionalInfo": {
+                        "ageRestricted": False,
+                        "availableCountries": "public",
+                        "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+                        "originalUrl": url,
+                        "extractionMethod": "innertube_api"
+                    }
+                }
+            else:
+                raise Exception(f"InnerTube API returned status {response.status_code}")
+                
+        except Exception as e:
+            raise Exception(f"InnerTube API failed: {str(e)}")
 
 
 async def scrape_with_oembed_and_page(video_id: str, url: str) -> Dict[str, Any]:
@@ -373,14 +532,24 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
     except Exception as e:
         # Log the error for debugging
         print(f"⚠️ yt-dlp extraction failed for {video_id}: {str(e)}")
-        # Fallback to web scraping if yt-dlp fails
+        
+        # Try InnerTube API first (best fallback with statistics)
         try:
-            print(f"→ Attempting fallback scraping for {video_id}")
-            data = await scrape_with_oembed_and_page(video_id, url)
+            print(f"→ Attempting InnerTube API for {video_id}")
+            data = await scrape_with_innertube_api(video_id, url)
+            print(f"✅ InnerTube API success for {video_id}")
             return VideoResponse(success=True, data=data)
-        except Exception as fallback_error:
-            print(f"❌ Fallback also failed for {video_id}: {str(fallback_error)}")
-            raise HTTPException(status_code=500, detail=f"Primary error: {str(e)}, Fallback error: {str(fallback_error)}")
+        except Exception as innertube_error:
+            print(f"⚠️ InnerTube API failed: {str(innertube_error)}")
+            
+            # Final fallback to oEmbed (basic info only)
+            try:
+                print(f"→ Attempting oEmbed fallback for {video_id}")
+                data = await scrape_with_oembed_and_page(video_id, url)
+                return VideoResponse(success=True, data=data)
+            except Exception as fallback_error:
+                print(f"❌ All methods failed for {video_id}")
+                raise HTTPException(status_code=500, detail=f"yt-dlp: {str(e)}, InnerTube: {str(innertube_error)}, oEmbed: {str(fallback_error)}")
 
 
 @app.post("/video", response_model=VideoResponse)
@@ -400,14 +569,24 @@ async def get_video_by_body(request: VideoRequest):
     except Exception as e:
         # Log the error for debugging
         print(f"⚠️ yt-dlp extraction failed for {video_id}: {str(e)}")
-        # Fallback to web scraping if yt-dlp fails
+        
+        # Try InnerTube API first (best fallback with statistics)
         try:
-            print(f"→ Attempting fallback scraping for {video_id}")
-            data = await scrape_with_oembed_and_page(video_id, request.url)
+            print(f"→ Attempting InnerTube API for {video_id}")
+            data = await scrape_with_innertube_api(video_id, request.url)
+            print(f"✅ InnerTube API success for {video_id}")
             return VideoResponse(success=True, data=data)
-        except Exception as fallback_error:
-            print(f"❌ Fallback also failed for {video_id}: {str(fallback_error)}")
-            raise HTTPException(status_code=500, detail=f"Primary error: {str(e)}, Fallback error: {str(fallback_error)}")
+        except Exception as innertube_error:
+            print(f"⚠️ InnerTube API failed: {str(innertube_error)}")
+            
+            # Final fallback to oEmbed (basic info only)
+            try:
+                print(f"→ Attempting oEmbed fallback for {video_id}")
+                data = await scrape_with_oembed_and_page(video_id, request.url)
+                return VideoResponse(success=True, data=data)
+            except Exception as fallback_error:
+                print(f"❌ All methods failed for {video_id}")
+                raise HTTPException(status_code=500, detail=f"yt-dlp: {str(e)}, InnerTube: {str(innertube_error)}, oEmbed: {str(fallback_error)}")
 
 
 if __name__ == "__main__":
