@@ -102,160 +102,227 @@ def get_thumbnail_urls(video_id: str) -> Dict[str, Dict[str, Any]]:
 
 async def scrape_with_innertube_api(video_id: str, url: str) -> Dict[str, Any]:
     """
-    🚀 ADVANCED: Use YouTube's InnerTube API directly
-    Uses ANDROID_TESTSUITE client - most reliable for servers!
+    🚀 ADVANCED: Hybrid InnerTube API approach
+    - ANDROID_TESTSUITE for views & metadata
+    - WEB client for likes & comments
     """
     
-    # ANDROID_TESTSUITE - works perfectly on Render/servers (no API key needed!)
-    payload = {
-        "videoId": video_id,
-        "context": {
-            "client": {
-                "clientName": "ANDROID_TESTSUITE",
-                "clientVersion": "1.9",
-                "androidSdkVersion": 30,
-                "hl": "en",
-                "gl": "US"
-            }
-        }
-    }
-    
-    headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'com.google.android.youtube/1.9 (Linux; U; Android 11)',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-    
-    api_url = "https://www.youtube.com/youtubei/v1/player"
-    
     async with httpx.AsyncClient(timeout=30.0) as client:
+        view_count = "0"
+        like_count = "0"
+        comment_count = "0"
+        video_details = {}
+        microformat = {}
+        
+        # Step 1: Get views and metadata from ANDROID_TESTSUITE
         try:
-            # Get video details from player API
-            response = await client.post(api_url, json=payload, headers=headers)
+            payload = {
+                "videoId": video_id,
+                "context": {
+                    "client": {
+                        "clientName": "ANDROID_TESTSUITE",
+                        "clientVersion": "1.9",
+                        "androidSdkVersion": 30,
+                        "hl": "en",
+                        "gl": "US"
+                    }
+                }
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'com.google.android.youtube/1.9 (Linux; U; Android 11)',
+            }
+            
+            response = await client.post("https://www.youtube.com/youtubei/v1/player", json=payload, headers=headers)
             
             if response.status_code == 200:
                 data = response.json()
                 video_details = data.get('videoDetails', {})
                 microformat = data.get('microformat', {}).get('playerMicroformatRenderer', {})
-                
-                # Try to get engagement data (likes, comments) from "next" API
-                like_count = "0"
-                comment_count = "0"
-                try:
-                    next_api_url = "https://www.youtube.com/youtubei/v1/next"
-                    next_response = await client.post(next_api_url, json=payload, headers=headers, timeout=10.0)
-                    
-                    if next_response.status_code == 200:
-                        next_data = next_response.json()
-                        
-                        # Extract likes from engagement panel
-                        engagement_panels = next_data.get('engagementPanels', [])
-                        for panel in engagement_panels:
-                            content = panel.get('engagementPanelSectionListRenderer', {}).get('content', {})
-                            # Look for like button
-                            if 'structuredDescriptionContentRenderer' in content:
-                                items = content.get('structuredDescriptionContentRenderer', {}).get('items', [])
-                                for item in items:
-                                    if 'videoDescriptionHeaderRenderer' in item:
-                                        likes_text = item.get('videoDescriptionHeaderRenderer', {}).get('likeButton', {}).get('likeButtonRenderer', {}).get('likeCount', '')
-                                        if likes_text:
-                                            like_count = likes_text
-                        
-                        # Extract comments from contents
-                        contents = next_data.get('contents', {}).get('twoColumnWatchNextResults', {}).get('results', {}).get('results', {}).get('contents', [])
-                        for content in contents:
-                            if 'itemSectionRenderer' in content:
-                                items = content.get('itemSectionRenderer', {}).get('contents', [])
-                                for item in items:
-                                    if 'commentsEntryPointHeaderRenderer' in item:
-                                        comment_text = item.get('commentsEntryPointHeaderRenderer', {}).get('commentCount', {}).get('simpleText', '0')
-                                        if comment_text:
-                                            comment_count = comment_text.replace(',', '').split()[0]
-                except Exception as next_error:
-                    print(f"⚠️ Next API failed (likes/comments unavailable): {str(next_error)}")
-                
                 view_count = video_details.get('viewCount', '0')
-                is_short = '/shorts/' in url or (int(video_details.get('lengthSeconds', 0)) <= 60)
-                
-                # Format date
-                publish_date = microformat.get('publishDate', '')
-                upload_date = microformat.get('uploadDate', '')
-                formatted_date = publish_date or upload_date or ''
-                
-                return {
-                    "videoId": video_id,
-                    "isShort": is_short,
-                    "snippet": {
-                        "publishedAt": formatted_date,
-                        "channelId": video_details.get('channelId', ''),
-                        "channelUrl": f"https://www.youtube.com/channel/{video_details.get('channelId', '')}" if video_details.get('channelId') else '',
-                        "title": video_details.get('title', ''),
-                        "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', '')),
-                        "thumbnails": get_thumbnail_urls(video_id),
-                        "channelTitle": video_details.get('author', ''),
-                        "categoryId": microformat.get('category', ''),
-                        "liveBroadcastContent": "live" if video_details.get('isLiveContent') else "none",
-                        "defaultLanguage": None,
-                        "localized": {
-                            "title": video_details.get('title', ''),
-                            "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', ''))
-                        },
-                        "defaultAudioLanguage": None,
-                        "tags": video_details.get('keywords', [])
-                    },
-                            "statistics": {
-                                "viewCount": str(view_count),
-                                "likeCount": str(like_count),
-                                "favoriteCount": "0",
-                                "commentCount": str(comment_count)
-                            },
-                    "status": {
-                        "uploadStatus": "processed",
-                        "privacyStatus": "public",
-                        "license": "youtube",
-                        "embeddable": not microformat.get('isUnlisted', False),
-                        "publicStatsViewable": True,
-                        "madeForKids": microformat.get('isFamilySafe', False)
-                    },
-                    "contentDetails": {
-                        "duration": format_duration(int(video_details.get('lengthSeconds', 0))),
-                        "durationSeconds": int(video_details.get('lengthSeconds', 0)),
-                        "dimension": "2d",
-                        "definition": "hd",
-                        "caption": "false",
-                        "licensedContent": True,
-                        "contentRating": {},
-                        "projection": "rectangular"
-                    },
-                    "player": {
-                        "embedHtml": f'<iframe width="480" height="270" src="//www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe>'
-                    },
-                    "channel": {
-                        "id": video_details.get('channelId', ''),
-                        "title": video_details.get('author', ''),
-                        "customUrl": f"https://www.youtube.com/@{video_details.get('author', '').replace(' ', '')}",
-                        "subscriberCount": "0",
-                        "thumbnails": {
-                            "default": {
-                                "url": "",
-                                "width": 88,
-                                "height": 88
-                            }
-                        }
-                    },
-                    "additionalInfo": {
-                        "ageRestricted": False,
-                        "availableCountries": "public",
-                        "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
-                        "originalUrl": url,
-                        "extractionMethod": "innertube_api"
+                print(f"✅ Views: {view_count}")
+        except Exception as e:
+            print(f"⚠️ Player API failed: {str(e)}")
+        
+        # Step 2: Get likes and comments from WEB client "next" API
+        try:
+            web_payload = {
+                "videoId": video_id,
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": "2.20240304.00.00"
                     }
                 }
-            else:
-                raise Exception(f"InnerTube API returned status {response.status_code}")
+            }
+            
+            web_headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+            
+            next_response = await client.post(
+                "https://www.youtube.com/youtubei/v1/next",
+                json=web_payload,
+                headers=web_headers,
+                timeout=15.0
+            )
+            
+            if next_response.status_code == 200:
+                next_data = next_response.json()
+                contents = next_data.get('contents', {}).get('twoColumnWatchNextResults', {}).get('results', {}).get('results', {}).get('contents', [])
                 
+                # Extract likes from button
+                if contents and 'videoPrimaryInfoRenderer' in contents[0]:
+                    try:
+                        buttons = contents[0]['videoPrimaryInfoRenderer']['videoActions']['menuRenderer']['topLevelButtons']
+                        like_vm = buttons[0]['segmentedLikeDislikeButtonViewModel']['likeButtonViewModel']['likeButtonViewModel']
+                        like_count = like_vm['toggleButtonViewModel']['toggleButtonViewModel']['defaultButtonViewModel']['buttonViewModel'].get('title', '0')
+                        print(f"✅ Likes: {like_count}")
+                    except:
+                        pass
+                
+                # Extract likes and comments from engagement panels
+                panels = next_data.get('engagementPanels', [])
+                for panel in panels:
+                    if 'engagementPanelSectionListRenderer' in panel:
+                        panel_renderer = panel['engagementPanelSectionListRenderer']
+                        panel_id = panel_renderer.get('panelIdentifier', '')
+                        
+                        # Check comments panel header for comment count
+                        if 'comments-section' in panel_id:
+                            header = panel_renderer.get('header', {})
+                            if 'engagementPanelTitleHeaderRenderer' in header:
+                                title_header = header['engagementPanelTitleHeaderRenderer']
+                                contextual_info = title_header.get('contextualInfo', {}).get('runs', [])
+                                if contextual_info:
+                                    comment_count = contextual_info[0].get('text', '0')
+                                    print(f"✅ Comments (panel): {comment_count}")
+                        
+                        # Also check factoids for likes
+                        items = panel_renderer.get('content', {}).get('structuredDescriptionContentRenderer', {}).get('items', [])
+                        for item in items:
+                            if 'videoDescriptionHeaderRenderer' in item:
+                                factoids = item['videoDescriptionHeaderRenderer'].get('factoid', [])
+                                for factoid in factoids:
+                                    if 'factoidRenderer' in factoid:
+                                        fr = factoid['factoidRenderer']
+                                        label = fr.get('label', {}).get('simpleText', '').lower()
+                                        value = fr.get('value', {}).get('simpleText', '0')
+                                        
+                                        if 'like' in label and value != '0':
+                                            like_count = value
+                                            print(f"✅ Likes (factoid): {like_count}")
+                
+                # Check comments entry point
+                for content in contents:
+                    if 'itemSectionRenderer' in content:
+                        for item in content['itemSectionRenderer'].get('contents', []):
+                            if 'commentsEntryPointHeaderRenderer' in item:
+                                comment_text = item['commentsEntryPointHeaderRenderer'].get('commentCount', {}).get('simpleText', '0')
+                                if comment_text and comment_text != '0':
+                                    comment_count = comment_text.replace(',', '').split()[0]
+                                    print(f"✅ Comments (entry): {comment_count}")
+                                    
         except Exception as e:
-            raise Exception(f"InnerTube API failed: {str(e)}")
+            print(f"⚠️ Next API failed: {str(e)}")
+        
+        # Step 3: If comments still 0, scrape from HTML (last resort)
+        if comment_count == "0":
+            try:
+                page_url = f"https://www.youtube.com/shorts/{video_id}"
+                page_response = await client.get(page_url, headers={
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_6 like Mac OS X) AppleWebKit/605.1.15'
+                }, timeout=10.0)
+                
+                if page_response.status_code == 200:
+                    html = page_response.text
+                    
+                    # Regex to find comment count
+                    comment_match = re.search(r'(\d+)\s+comment', html, re.IGNORECASE)
+                    if comment_match:
+                        comment_count = comment_match.group(1)
+                        print(f"✅ Comments (HTML): {comment_count}")
+                        
+            except Exception as e:
+                print(f"⚠️ HTML scraping failed: {str(e)}")
+        
+        # Build final response
+        is_short = '/shorts/' in url or (int(video_details.get('lengthSeconds', 0)) <= 60)
+        publish_date = microformat.get('publishDate', '')
+        upload_date = microformat.get('uploadDate', '')
+        formatted_date = publish_date or upload_date or ''
+        
+        return {
+            "videoId": video_id,
+            "isShort": is_short,
+            "snippet": {
+                "publishedAt": formatted_date,
+                "channelId": video_details.get('channelId', ''),
+                "channelUrl": f"https://www.youtube.com/channel/{video_details.get('channelId', '')}" if video_details.get('channelId') else '',
+                "title": video_details.get('title', ''),
+                "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', '')),
+                "thumbnails": get_thumbnail_urls(video_id),
+                "channelTitle": video_details.get('author', ''),
+                "categoryId": microformat.get('category', ''),
+                "liveBroadcastContent": "live" if video_details.get('isLiveContent') else "none",
+                "defaultLanguage": None,
+                "localized": {
+                    "title": video_details.get('title', ''),
+                    "description": microformat.get('description', {}).get('simpleText', '') if isinstance(microformat.get('description'), dict) else str(microformat.get('description', ''))
+                },
+                "defaultAudioLanguage": None,
+                "tags": video_details.get('keywords', [])
+            },
+            "statistics": {
+                "viewCount": str(view_count),
+                "likeCount": str(like_count),
+                "favoriteCount": "0",
+                "commentCount": str(comment_count)
+            },
+            "status": {
+                "uploadStatus": "processed",
+                "privacyStatus": "public",
+                "license": "youtube",
+                "embeddable": not microformat.get('isUnlisted', False),
+                "publicStatsViewable": True,
+                "madeForKids": microformat.get('isFamilySafe', False)
+            },
+            "contentDetails": {
+                "duration": format_duration(int(video_details.get('lengthSeconds', 0))),
+                "durationSeconds": int(video_details.get('lengthSeconds', 0)),
+                "dimension": "2d",
+                "definition": "hd",
+                "caption": "false",
+                "licensedContent": True,
+                "contentRating": {},
+                "projection": "rectangular"
+            },
+            "player": {
+                "embedHtml": f'<iframe width="480" height="270" src="//www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe>'
+            },
+            "channel": {
+                "id": video_details.get('channelId', ''),
+                "title": video_details.get('author', ''),
+                "customUrl": f"https://www.youtube.com/@{video_details.get('author', '').replace(' ', '')}",
+                "subscriberCount": "0",
+                "thumbnails": {
+                    "default": {
+                        "url": "",
+                        "width": 88,
+                        "height": 88
+                    }
+                }
+            },
+            "additionalInfo": {
+                "ageRestricted": False,
+                "availableCountries": "public",
+                "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+                "originalUrl": url,
+                "extractionMethod": "innertube_hybrid"
+            }
+        }
 
 
 async def scrape_with_oembed_and_page(video_id: str, url: str) -> Dict[str, Any]:
