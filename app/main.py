@@ -69,6 +69,20 @@ def format_duration(seconds: int) -> str:
     return duration
 
 
+def parse_youtube_date_text(text: str) -> str:
+    """Convert YouTube's dateText (e.g. 'Mar 15, 2024', 'Premiered Mar 15, 2024',
+    'Streamed live on Mar 15, 2024') to ISO 8601. Returns '' if unparseable."""
+    if not text:
+        return ''
+    cleaned = re.sub(r'^(Premiered|Streamed live on|Started streaming on)\s+', '', text.strip())
+    for fmt in ('%b %d, %Y', '%B %d, %Y', '%d %b %Y', '%d %B %Y'):
+        try:
+            return datetime.strptime(cleaned, fmt).strftime('%Y-%m-%dT00:00:00Z')
+        except ValueError:
+            continue
+    return ''
+
+
 def get_thumbnail_urls(video_id: str) -> Dict[str, Dict[str, Any]]:
     """Generate thumbnail URLs for all sizes"""
     return {
@@ -144,7 +158,41 @@ async def scrape_with_innertube_api(video_id: str, url: str) -> Dict[str, Any]:
                 print(f"✅ Views: {view_count}")
         except Exception as e:
             print(f"⚠️ Player API failed: {str(e)}")
-        
+
+        # Step 1b: WEB /player for microformat (publishDate, category, description)
+        if not microformat.get('publishDate'):
+            try:
+                web_player_payload = {
+                    "videoId": video_id,
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20240304.00.00"
+                        }
+                    }
+                }
+                web_player_headers = {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                }
+                wp = await client.post(
+                    "https://www.youtube.com/youtubei/v1/player",
+                    json=web_player_payload,
+                    headers=web_player_headers,
+                    timeout=15.0,
+                )
+                if wp.status_code == 200:
+                    wp_data = wp.json()
+                    wp_micro = wp_data.get('microformat', {}).get('playerMicroformatRenderer', {})
+                    if wp_micro:
+                        # Merge: prefer ANDROID_TESTSUITE values where present, fill gaps from WEB
+                        for k, v in wp_micro.items():
+                            microformat.setdefault(k, v)
+                        if microformat.get('publishDate'):
+                            print(f"✅ Date (web/player): {microformat['publishDate']}")
+            except Exception as e:
+                print(f"⚠️ WEB /player failed: {str(e)}")
+
         # Step 2: Get likes and comments from WEB client "next" API
         try:
             web_payload = {
@@ -173,13 +221,22 @@ async def scrape_with_innertube_api(video_id: str, url: str) -> Dict[str, Any]:
                 next_data = next_response.json()
                 contents = next_data.get('contents', {}).get('twoColumnWatchNextResults', {}).get('results', {}).get('results', {}).get('contents', [])
                 
-                # Extract likes from button
+                # Extract likes from button + dateText from primary info
                 if contents and 'videoPrimaryInfoRenderer' in contents[0]:
+                    primary = contents[0]['videoPrimaryInfoRenderer']
                     try:
-                        buttons = contents[0]['videoPrimaryInfoRenderer']['videoActions']['menuRenderer']['topLevelButtons']
+                        buttons = primary['videoActions']['menuRenderer']['topLevelButtons']
                         like_vm = buttons[0]['segmentedLikeDislikeButtonViewModel']['likeButtonViewModel']['likeButtonViewModel']
                         like_count = like_vm['toggleButtonViewModel']['toggleButtonViewModel']['defaultButtonViewModel']['buttonViewModel'].get('title', '0')
                         print(f"✅ Likes: {like_count}")
+                    except:
+                        pass
+                    try:
+                        date_text = primary.get('dateText', {}).get('simpleText', '')
+                        iso = parse_youtube_date_text(date_text)
+                        if iso and not microformat.get('publishDate'):
+                            microformat['publishDate'] = iso
+                            print(f"✅ Date (next): {iso}")
                     except:
                         pass
                 
@@ -449,7 +506,7 @@ def scrape_youtube_video(url: str) -> Dict[str, Any]:
         'extractor_args': {
             'youtube': {
                 'player_client': ['ios', 'android_embedded', 'web'],
-                'player_skip': ['configs', 'webpage'],
+                'player_skip': ['configs'],
                 'skip': ['hls', 'dash', 'translated_subs']
             }
         },
@@ -562,6 +619,29 @@ def scrape_youtube_video(url: str) -> Dict[str, Any]:
     return response
 
 
+async def enrich_with_innertube_if_needed(response: Dict[str, Any], video_id: str, url: str) -> Dict[str, Any]:
+    """For Shorts, yt-dlp typically returns likeCount=0. Run InnerTube and
+    merge in non-zero like / comment counts so dashboards don't see gaps."""
+    if not response.get('isShort'):
+        return response
+    stats = response.setdefault('statistics', {})
+    needs_likes = stats.get('likeCount', '0') in ('0', '', None)
+    needs_comments = stats.get('commentCount', '0') in ('0', '', None)
+    if not (needs_likes or needs_comments):
+        return response
+    try:
+        it_data = await scrape_with_innertube_api(video_id, url)
+        it_stats = it_data.get('statistics', {})
+        if needs_likes and it_stats.get('likeCount') not in ('0', '', None):
+            stats['likeCount'] = it_stats['likeCount']
+        if needs_comments and it_stats.get('commentCount') not in ('0', '', None):
+            stats['commentCount'] = it_stats['commentCount']
+        response.setdefault('additionalInfo', {})['enrichedWith'] = 'innertube'
+    except Exception as e:
+        print(f"⚠️ InnerTube enrichment failed for {video_id}: {str(e)}")
+    return response
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API info"""
@@ -595,11 +675,12 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
     
     try:
         data = scrape_youtube_video(url)
+        data = await enrich_with_innertube_if_needed(data, video_id, url)
         return VideoResponse(success=True, data=data)
     except Exception as e:
         # Log the error for debugging
         print(f"⚠️ yt-dlp extraction failed for {video_id}: {str(e)}")
-        
+
         # Try InnerTube API first (best fallback with statistics)
         try:
             print(f"→ Attempting InnerTube API for {video_id}")
@@ -608,7 +689,7 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
             return VideoResponse(success=True, data=data)
         except Exception as innertube_error:
             print(f"⚠️ InnerTube API failed: {str(innertube_error)}")
-            
+
             # Final fallback to oEmbed (basic info only)
             try:
                 print(f"→ Attempting oEmbed fallback for {video_id}")
@@ -623,15 +704,16 @@ async def get_video_by_query(url: str = Query(..., description="YouTube video or
 async def get_video_by_body(request: VideoRequest):
     """
     Get YouTube video metadata by URL in request body
-    
+
     Request body: {"url": "https://www.youtube.com/watch?v=VIDEO_ID"}
     """
     video_id = extract_video_id(request.url)
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
-    
+
     try:
         data = scrape_youtube_video(request.url)
+        data = await enrich_with_innertube_if_needed(data, video_id, request.url)
         return VideoResponse(success=True, data=data)
     except Exception as e:
         # Log the error for debugging
